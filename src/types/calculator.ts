@@ -17,6 +17,8 @@ export interface AuditLogEntry {
     | 'DELETE_PRODUCT'
     | 'UPDATE_PRICE'
     | 'UPDATE_SALES'
+    | 'CREATE_CATEGORY'
+    | 'DELETE_CATEGORY'
     | 'RESET_CATALOG';
   entityId?: string;
   entityName?: string;

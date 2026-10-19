@@ -3816,27 +3816,106 @@ const INITIAL_SERVER_PRODUCTS = [
   },
 ];
 
+const CALC_DELETED_IDS_FILE = path.join(process.cwd(), 'data', 'calculator_deleted_ids.json');
+
+function getCalcDeletedIdsFromServer(): string[] {
+  try {
+    if (fs.existsSync(CALC_DELETED_IDS_FILE)) {
+      const data = fs.readFileSync(CALC_DELETED_IDS_FILE, 'utf-8');
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed)) return parsed.map(String);
+    }
+  } catch {}
+  return [];
+}
+
+function addCalcDeletedIdToServer(id: string): string[] {
+  try {
+    const list = getCalcDeletedIdsFromServer();
+    const strId = String(id);
+    if (!list.includes(strId)) {
+      list.push(strId);
+      const dir = path.dirname(CALC_DELETED_IDS_FILE);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(CALC_DELETED_IDS_FILE, JSON.stringify(list, null, 2), 'utf-8');
+    }
+    return list;
+  } catch {
+    return [];
+  }
+}
+
 function getCalcProductsFromServer(): any[] {
   try {
+    const deletedIds = getCalcDeletedIdsFromServer();
     if (fs.existsSync(CALC_PRODUCTS_FILE)) {
       const data = fs.readFileSync(CALC_PRODUCTS_FILE, 'utf-8');
       const parsed = JSON.parse(data);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed)) {
+        return parsed.filter((p: any) => p && p.id && !deletedIds.includes(String(p.id)));
+      }
+    } else {
+      const initial = INITIAL_SERVER_PRODUCTS.filter((p: any) => !deletedIds.includes(String(p.id)));
+      saveCalcProductsToServer(initial);
+      return initial;
     }
   } catch (err) {
     console.error('Error reading calc products:', err);
   }
-  return INITIAL_SERVER_PRODUCTS;
+  return [];
 }
 
 function saveCalcProductsToServer(list: any[]): boolean {
   try {
+    const deletedIds = getCalcDeletedIdsFromServer();
+    const filtered = (list || []).filter((p: any) => p && p.id && !deletedIds.includes(String(p.id)));
     const dir = path.dirname(CALC_PRODUCTS_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(CALC_PRODUCTS_FILE, JSON.stringify(list, null, 2), 'utf-8');
+    fs.writeFileSync(CALC_PRODUCTS_FILE, JSON.stringify(filtered, null, 2), 'utf-8');
     return true;
   } catch (err) {
     console.error('Error writing calc products:', err);
+    return false;
+  }
+}
+
+const CALC_CATEGORIES_FILE = path.join(process.cwd(), 'data', 'calculator_categories.json');
+const DEFAULT_CALC_CATEGORIES = [
+  'Home & Living',
+  'Desk & Tech',
+  'Toys & Fidgets',
+  'Art & Sculptures',
+  'Mechanical & Tools',
+  'Accessories & Wearables',
+  'Outdoor & Garden',
+  'Custom Print Commission',
+];
+
+function getCalcCategoriesFromServer(): string[] {
+  try {
+    if (fs.existsSync(CALC_CATEGORIES_FILE)) {
+      const data = fs.readFileSync(CALC_CATEGORIES_FILE, 'utf-8');
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return Array.from(new Set(parsed.map(String).map((c) => c.trim()).filter(Boolean)));
+      }
+    }
+  } catch (err) {
+    console.error('Error reading calc categories:', err);
+  }
+  saveCalcCategoriesToServer(DEFAULT_CALC_CATEGORIES);
+  return DEFAULT_CALC_CATEGORIES;
+}
+
+function saveCalcCategoriesToServer(categories: string[]): boolean {
+  try {
+    const clean = Array.from(new Set(categories.map(String).map((c) => c.trim()).filter(Boolean)));
+    const dir = path.dirname(CALC_CATEGORIES_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(CALC_CATEGORIES_FILE, JSON.stringify(clean, null, 2), 'utf-8');
+    return true;
+  } catch (err) {
+    console.error('Error saving calc categories:', err);
     return false;
   }
 }
@@ -4062,9 +4141,13 @@ apiRouter.delete('/calculator-products/:id', (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { user } = req.query as { user?: string };
+    
+    // Register tombstone permanently
+    addCalcDeletedIdToServer(id);
+
     let list = getCalcProductsFromServer();
-    const target = list.find((p: any) => p.id === id);
-    list = list.filter((p: any) => p.id !== id);
+    const target = list.find((p: any) => String(p.id) === String(id));
+    list = list.filter((p: any) => String(p.id) !== String(id));
     saveCalcProductsToServer(list);
 
     appendAuditLogToServer({
@@ -4075,9 +4158,30 @@ apiRouter.delete('/calculator-products/:id', (req: Request, res: Response) => {
       status: 'Success',
     });
 
-    res.json({ success: true, id, products: list });
+    res.json({ success: true, id, products: list, deletedIds: getCalcDeletedIdsFromServer() });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to delete product' });
+  }
+});
+
+apiRouter.get('/calculator-products/deleted-ids', (req: Request, res: Response) => {
+  try {
+    const list = getCalcDeletedIdsFromServer();
+    res.json(list);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to fetch deleted ids' });
+  }
+});
+
+apiRouter.post('/calculator-products/deleted-ids', (req: Request, res: Response) => {
+  try {
+    const { id } = req.body || {};
+    if (id) {
+      addCalcDeletedIdToServer(String(id));
+    }
+    res.json({ success: true, deletedIds: getCalcDeletedIdsFromServer() });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to record deleted id' });
   }
 });
 
@@ -4109,6 +4213,66 @@ apiRouter.post('/calculator-products/:id/sales', (req: Request, res: Response) =
     res.json({ success: true, product: target, products: list });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to update sales' });
+  }
+});
+
+// 3.1. Categories Endpoints (Server Persistent & Live Synced)
+apiRouter.get('/calculator-categories', (req: Request, res: Response) => {
+  try {
+    const categories = getCalcCategoriesFromServer();
+    res.json({ success: true, categories });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to fetch categories' });
+  }
+});
+
+apiRouter.post('/calculator-categories', (req: Request, res: Response) => {
+  try {
+    const { name, user } = req.body || {};
+    const trimmed = (name || '').toString().trim();
+    if (!trimmed) {
+      return res.status(400).json({ error: 'Category name is required' });
+    }
+    const current = getCalcCategoriesFromServer();
+    const exists = current.some((c) => c.toLowerCase() === trimmed.toLowerCase());
+    if (!exists) {
+      current.push(trimmed);
+      saveCalcCategoriesToServer(current);
+      appendAuditLogToServer({
+        user: user || 'Partner',
+        action: 'CREATE_CATEGORY',
+        category: 'calculator',
+        details: `${user || 'Partner'} created new product category "${trimmed}".`,
+        status: 'Success',
+      });
+    }
+    res.json({ success: true, category: trimmed, categories: current });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to create category' });
+  }
+});
+
+apiRouter.delete('/calculator-categories/:name', (req: Request, res: Response) => {
+  try {
+    const { name } = req.params;
+    const { user } = req.query as { user?: string };
+    const trimmed = decodeURIComponent(name || '').trim();
+    let current = getCalcCategoriesFromServer();
+    const beforeCount = current.length;
+    current = current.filter((c) => c.toLowerCase() !== trimmed.toLowerCase());
+    if (current.length < beforeCount) {
+      saveCalcCategoriesToServer(current);
+      appendAuditLogToServer({
+        user: user || 'Partner',
+        action: 'DELETE_CATEGORY',
+        category: 'calculator',
+        details: `${user || 'Partner'} deleted category "${trimmed}".`,
+        status: 'Success',
+      });
+    }
+    res.json({ success: true, removed: trimmed, categories: current });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to delete category' });
   }
 });
 

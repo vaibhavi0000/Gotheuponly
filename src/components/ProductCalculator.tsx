@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Calculator,
   Plus,
@@ -25,6 +25,7 @@ interface ProductCalculatorProps {
   existingCategories?: string[];
   onSaveProduct: (productData: Omit<CalculatedProduct, 'id' | 'createdAt' | 'updatedAt' | 'materialCost' | 'electricityCost' | 'machineCost' | 'laborCost' | 'customCostsTotal' | 'totalCostPerUnit' | 'profitPerUnit' | 'profitMarginPercent' | 'totalRevenue' | 'totalProfit'>, existingId?: string) => void;
   onDeleteProduct?: (id: string) => void;
+  onAddCategory?: (categoryName: string) => Promise<void> | void;
   onCancel?: () => void;
 }
 
@@ -47,6 +48,7 @@ export const ProductCalculator: React.FC<ProductCalculatorProps> = ({
   existingCategories = [],
   onSaveProduct,
   onDeleteProduct,
+  onAddCategory,
   onCancel,
 }) => {
   // Product info
@@ -65,6 +67,13 @@ export const ProductCalculator: React.FC<ProductCalculatorProps> = ({
     ]);
     return Array.from(combined);
   });
+
+  useEffect(() => {
+    if (existingCategories && existingCategories.length > 0) {
+      setCategoriesList((prev) => Array.from(new Set([...prev, ...existingCategories])));
+    }
+  }, [existingCategories]);
+
   const [showDeleteModal, setShowDeleteModal] = useState(false);
 
   // 3D Printing & Machine parameters
@@ -222,9 +231,11 @@ export const ProductCalculator: React.FC<ProductCalculatorProps> = ({
       : category.trim() || 'Home & Living';
 
     if (isCreatingCategory && newCategoryName.trim()) {
-      if (!categoriesList.includes(newCategoryName.trim())) {
-        setCategoriesList((prev) => [...prev, newCategoryName.trim()]);
+      const trimmed = newCategoryName.trim();
+      if (!categoriesList.includes(trimmed)) {
+        setCategoriesList((prev) => [...prev, trimmed]);
       }
+      onAddCategory?.(trimmed);
       setCategory(resolvedCategory);
       setIsCreatingCategory(false);
     }
@@ -412,6 +423,7 @@ export const ProductCalculator: React.FC<ProductCalculatorProps> = ({
                           if (!categoriesList.includes(trimmed)) {
                             setCategoriesList((prev) => [...prev, trimmed]);
                           }
+                          onAddCategory?.(trimmed);
                           setCategory(trimmed);
                           setIsCreatingCategory(false);
                         }
@@ -426,6 +438,7 @@ export const ProductCalculator: React.FC<ProductCalculatorProps> = ({
                           if (!categoriesList.includes(trimmed)) {
                             setCategoriesList((prev) => [...prev, trimmed]);
                           }
+                          onAddCategory?.(trimmed);
                           setCategory(trimmed);
                           setIsCreatingCategory(false);
                         }

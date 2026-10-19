@@ -1,5 +1,68 @@
 [
   {
+    "id": "audit-1792394619477-871",
+    "timestamp": "2026-10-19T07:23:39.477Z",
+    "user": "Aditya",
+    "action": "CREATE_CATEGORY",
+    "category": "calculator",
+    "details": "Aditya created new product category \"Robotics & Tools\".",
+    "status": "Success"
+  },
+  {
+    "id": "audit-1792389515781-641",
+    "timestamp": "2026-10-19T05:58:35.781Z",
+    "user": "Aditya",
+    "action": "DELETE_PRODUCT",
+    "category": "calculator",
+    "details": "Aditya deleted product \"Parametric Ribbed Self-Watering Planter\".",
+    "status": "Success"
+  },
+  {
+    "id": "audit-1792389515285-762",
+    "timestamp": "2026-10-19T05:58:35.285Z",
+    "user": "Aditya",
+    "action": "Deleted Product Calculation",
+    "category": "calculator",
+    "details": "Aditya deleted model \"Parametric Ribbed Self-Watering Planter\".",
+    "status": "Success"
+  },
+  {
+    "id": "audit-1792389513574-333",
+    "timestamp": "2026-10-19T05:58:33.574Z",
+    "user": "Aditya",
+    "action": "DELETE_PRODUCT",
+    "category": "calculator",
+    "details": "Aditya deleted product \"Articulated Crystal Dragon\".",
+    "status": "Success"
+  },
+  {
+    "id": "audit-1792389513179-590",
+    "timestamp": "2026-10-19T05:58:33.179Z",
+    "user": "Aditya",
+    "action": "Deleted Product Calculation",
+    "category": "calculator",
+    "details": "Aditya deleted model \"Articulated Crystal Dragon\".",
+    "status": "Success"
+  },
+  {
+    "id": "audit-1792389511462-647",
+    "timestamp": "2026-10-19T05:58:31.462Z",
+    "user": "Aditya",
+    "action": "DELETE_PRODUCT",
+    "category": "calculator",
+    "details": "Aditya deleted product \"Artisan Mechanical Keyboard Keycaps (Set of 4)\".",
+    "status": "Success"
+  },
+  {
+    "id": "audit-1792389510649-184",
+    "timestamp": "2026-10-19T05:58:30.649Z",
+    "user": "Aditya",
+    "action": "Deleted Product Calculation",
+    "category": "calculator",
+    "details": "Aditya deleted model \"Artisan Mechanical Keyboard Keycaps (Set of 4)\".",
+    "status": "Success"
+  },
+  {
     "id": "audit-1792389478627-120",
     "timestamp": "2026-10-19T05:57:58.627Z",
     "user": "Aditya",

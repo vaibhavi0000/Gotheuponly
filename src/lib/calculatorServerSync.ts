@@ -116,56 +116,83 @@ export async function loginPartner(
 }
 
 // -------------------------------------------------------------
-// Products Server & Firestore Dual-Persistence
+// Products Server & Firestore Dual-Persistence with Tombstones
 // -------------------------------------------------------------
 
+function getLocalDeletedIds(): string[] {
+  try {
+    const raw = localStorage.getItem('calc_deleted_product_ids');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map(String);
+    }
+  } catch {}
+  return [];
+}
+
+function recordLocalDeletedId(id: string): void {
+  try {
+    const current = getLocalDeletedIds();
+    const strId = String(id);
+    if (!current.includes(strId)) {
+      current.push(strId);
+      localStorage.setItem('calc_deleted_product_ids', JSON.stringify(current));
+    }
+  } catch {}
+}
+
 export async function fetchServerProducts(): Promise<CalculatedProduct[]> {
-  // 1. Try Server API endpoint
+  let serverDeletedIds: string[] = getLocalDeletedIds();
+
+  // 1. Fetch deleted IDs tombstones from server first
+  try {
+    const delRes = await fetch('/api/calculator-products/deleted-ids');
+    if (delRes.ok) {
+      const delList = await delRes.json();
+      if (Array.isArray(delList)) {
+        serverDeletedIds = Array.from(new Set([...serverDeletedIds, ...delList.map(String)]));
+        localStorage.setItem('calc_deleted_product_ids', JSON.stringify(serverDeletedIds));
+      }
+    }
+  } catch (err) {
+    console.warn('Error fetching deleted IDs from server:', err);
+  }
+
+  // 2. Fetch authoritative products list from Server API
   try {
     const res = await fetch('/api/calculator-products');
     if (res.ok) {
       const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
-        return data.map(recalculateStoredProduct);
+      if (Array.isArray(data)) {
+        // Filter out any tombstoned IDs deleted by either partner
+        const active = data
+          .filter((p: any) => p && p.id && !serverDeletedIds.includes(String(p.id)))
+          .map(recalculateStoredProduct);
+        return active;
       }
     }
   } catch (err) {
     console.warn('Error fetching products from server API:', err);
   }
 
-  // 2. Try Firestore 'calculator_products'
+  // 3. Try Firestore 'calculator_products'
   try {
     const snap = await getDocs(collection(db, 'calculator_products'));
     if (!snap.empty) {
       const list: CalculatedProduct[] = [];
       snap.forEach((d) => {
-        const item = d.data() as CalculatedProduct;
-        list.push(recalculateStoredProduct({ ...item, id: d.id }));
+        if (!serverDeletedIds.includes(d.id)) {
+          const item = d.data() as CalculatedProduct;
+          list.push(recalculateStoredProduct({ ...item, id: d.id }));
+        }
       });
-      if (list.length > 0) {
-        // Sync to server disk in background
-        fetch('/api/calculator-products/sync', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ products: list, user: 'System Sync' }),
-        }).catch(() => {});
-        return list;
-      }
+      return list;
     }
   } catch (fErr) {
     console.warn('Error fetching products from Firestore:', fErr);
   }
 
-  // 3. Fallback to initial default preset products & sync to server
-  try {
-    fetch('/api/calculator-products/sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ products: INITIAL_PRESET_PRODUCTS, user: 'Initial Seed' }),
-    }).catch(() => {});
-  } catch {}
-
-  return INITIAL_PRESET_PRODUCTS;
+  return [];
 }
 
 export async function saveProductToServer(
@@ -214,18 +241,31 @@ export async function deleteProductFromServer(
   actor: PartnerName,
   productName?: string
 ): Promise<boolean> {
-  // 1. Delete on Express Server API
+  const strId = String(id);
+  recordLocalDeletedId(strId);
+
+  // 1. Delete on Express Server API + Register Tombstone
   try {
-    await fetch(`/api/calculator-products/${encodeURIComponent(id)}?user=${encodeURIComponent(actor)}`, {
+    await fetch(`/api/calculator-products/${encodeURIComponent(strId)}?user=${encodeURIComponent(actor)}`, {
       method: 'DELETE',
+    });
+    await fetch('/api/calculator-products/deleted-ids', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: strId }),
     });
   } catch (err) {
     console.warn('Server delete error:', err);
   }
 
-  // 2. Delete on Firestore
+  // 2. Delete on Firestore & Record Tombstone Doc
   try {
-    await deleteDoc(doc(db, 'calculator_products', id));
+    await deleteDoc(doc(db, 'calculator_products', strId));
+    await setDoc(doc(db, 'calculator_deleted_ids', strId), {
+      id: strId,
+      deletedAt: new Date().toISOString(),
+      deletedBy: actor,
+    });
   } catch (fErr) {
     console.warn('Firestore delete error:', fErr);
   }
@@ -234,9 +274,9 @@ export async function deleteProductFromServer(
   await recordAuditLog({
     actor,
     action: 'DELETE_PRODUCT',
-    entityId: id,
+    entityId: strId,
     entityName: productName,
-    details: `${actor} deleted product "${productName || id}".`,
+    details: `${actor} deleted product "${productName || strId}".`,
   }).catch(() => {});
 
   return true;
@@ -298,37 +338,280 @@ export async function updateProductPriceOnServer(
 }
 
 // -------------------------------------------------------------
-// Real-Time Live Sync Subscription
+// Real-Time Cross-Device Synchronization (Server Polling + Firestore)
 // -------------------------------------------------------------
 
 export function subscribeToProductUpdates(
   onProducts: (products: CalculatedProduct[]) => void
 ): () => void {
-  // Try Firestore onSnapshot listener
+  let isMounted = true;
+  let lastProductFingerprint = '';
+
+  // 1. High-frequency active Server Poll (every 2.5 seconds)
+  // Ensures Anshuman's desktop in Australia reflects deletions made by Aditya immediately
+  const pollServer = async () => {
+    if (!isMounted) return;
+    try {
+      const activeProducts = await fetchServerProducts();
+      if (!isMounted) return;
+
+      const fingerprint = JSON.stringify(
+        activeProducts.map((p) => ({
+          id: p.id,
+          price: p.sellingPrice,
+          units: p.unitsSold,
+          updatedAt: p.updatedAt,
+        }))
+      );
+
+      if (fingerprint !== lastProductFingerprint) {
+        lastProductFingerprint = fingerprint;
+        onProducts(activeProducts);
+      }
+    } catch (e) {
+      console.warn('Real-time sync poll error:', e);
+    }
+  };
+
+  // Immediate first poll
+  pollServer();
+  const pollInterval = setInterval(pollServer, 2500);
+
+  // 2. Firestore onSnapshot real-time listener
+  let unsubFirestore = () => {};
   try {
-    const unsub = onSnapshot(
+    unsubFirestore = onSnapshot(
       collection(db, 'calculator_products'),
       (snapshot) => {
-        if (!snapshot.empty) {
-          const list: CalculatedProduct[] = [];
-          snapshot.forEach((d) => {
+        if (!isMounted) return;
+        const deletedIds = getLocalDeletedIds();
+        const list: CalculatedProduct[] = [];
+        snapshot.forEach((d) => {
+          if (!deletedIds.includes(d.id)) {
             const item = d.data() as CalculatedProduct;
             list.push(recalculateStoredProduct({ ...item, id: d.id }));
-          });
-          if (list.length > 0) {
-            onProducts(list);
           }
+        });
+        const fingerprint = JSON.stringify(
+          list.map((p) => ({
+            id: p.id,
+            price: p.sellingPrice,
+            units: p.unitsSold,
+            updatedAt: p.updatedAt,
+          }))
+        );
+        if (fingerprint !== lastProductFingerprint) {
+          lastProductFingerprint = fingerprint;
+          onProducts(list);
         }
       },
       (err) => {
-        console.warn('Firestore onSnapshot listener error, relying on server polling:', err);
+        console.warn('Firestore onSnapshot listener warning, continuing on server poll:', err);
       }
     );
-    return unsub;
   } catch (e) {
     console.warn('Unable to bind snapshot listener:', e);
-    return () => {};
   }
+
+  return () => {
+    isMounted = false;
+    clearInterval(pollInterval);
+    unsubFirestore();
+  };
+}
+
+// -------------------------------------------------------------
+// Category Management & Server / Firestore Live Sync
+// -------------------------------------------------------------
+
+export const DEFAULT_PRODUCT_CATEGORIES: string[] = [
+  'Home & Living',
+  'Desk & Tech',
+  'Toys & Fidgets',
+  'Art & Sculptures',
+  'Mechanical & Tools',
+  'Accessories & Wearables',
+  'Outdoor & Garden',
+  'Custom Print Commission',
+];
+
+export async function fetchServerCategories(): Promise<string[]> {
+  // 1. Fetch from Server API
+  try {
+    const res = await fetch('/api/calculator-categories');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.categories) && data.categories.length > 0) {
+        return data.categories;
+      }
+    }
+  } catch (err) {
+    console.warn('Error fetching categories from server API:', err);
+  }
+
+  // 2. Fetch from Firestore fallback
+  try {
+    const snap = await getDocs(collection(db, 'calculator_categories'));
+    if (!snap.empty) {
+      const list: string[] = [];
+      snap.forEach((d) => {
+        const name = d.data()?.name || d.id;
+        if (name && !list.includes(name)) list.push(name);
+      });
+      if (list.length > 0) return list;
+    }
+  } catch (fErr) {
+    console.warn('Error fetching categories from Firestore:', fErr);
+  }
+
+  return DEFAULT_PRODUCT_CATEGORIES;
+}
+
+export async function saveCategoryToServer(
+  name: string,
+  actor: PartnerName
+): Promise<string[]> {
+  const trimmed = name.trim();
+  if (!trimmed) return DEFAULT_PRODUCT_CATEGORIES;
+
+  // 1. Post to Server API
+  try {
+    const res = await fetch('/api/calculator-categories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: trimmed, user: actor }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.categories)) {
+        // Also persist to Firestore in background
+        try {
+          const docId = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '_');
+          await setDoc(doc(db, 'calculator_categories', docId), {
+            name: trimmed,
+            createdBy: actor,
+            createdAt: new Date().toISOString(),
+          });
+        } catch {}
+        return data.categories;
+      }
+    }
+  } catch (err) {
+    console.warn('Error saving category to server API:', err);
+  }
+
+  // 2. Firestore fallback
+  try {
+    const docId = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    await setDoc(doc(db, 'calculator_categories', docId), {
+      name: trimmed,
+      createdBy: actor,
+      createdAt: new Date().toISOString(),
+    });
+  } catch {}
+
+  // 3. Record Audit Log
+  await recordAuditLog({
+    actor,
+    action: 'CREATE_CATEGORY',
+    details: `${actor} created new product category "${trimmed}".`,
+  }).catch(() => {});
+
+  return [trimmed];
+}
+
+export async function deleteCategoryFromServer(
+  name: string,
+  actor: PartnerName
+): Promise<string[]> {
+  const trimmed = name.trim();
+  if (!trimmed) return [];
+
+  // 1. Delete on Server API
+  try {
+    const res = await fetch(`/api/calculator-categories/${encodeURIComponent(trimmed)}?user=${encodeURIComponent(actor)}`, {
+      method: 'DELETE',
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.categories)) {
+        try {
+          const docId = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '_');
+          await deleteDoc(doc(db, 'calculator_categories', docId));
+        } catch {}
+        return data.categories;
+      }
+    }
+  } catch (err) {
+    console.warn('Error deleting category from server API:', err);
+  }
+
+  // 2. Delete on Firestore
+  try {
+    const docId = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    await deleteDoc(doc(db, 'calculator_categories', docId));
+  } catch {}
+
+  await recordAuditLog({
+    actor,
+    action: 'DELETE_CATEGORY',
+    details: `${actor} deleted category "${trimmed}".`,
+  }).catch(() => {});
+
+  return [];
+}
+
+export function subscribeToCategoryUpdates(
+  onCategories: (cats: string[]) => void
+): () => void {
+  let isMounted = true;
+  let lastFingerprint = '';
+
+  const pollCategories = async () => {
+    if (!isMounted) return;
+    try {
+      const cats = await fetchServerCategories();
+      if (!isMounted) return;
+      const fp = JSON.stringify(cats);
+      if (fp !== lastFingerprint) {
+        lastFingerprint = fp;
+        onCategories(cats);
+      }
+    } catch {}
+  };
+
+  pollCategories();
+  const interval = setInterval(pollCategories, 2500);
+
+  let unsubFirestore = () => {};
+  try {
+    unsubFirestore = onSnapshot(
+      collection(db, 'calculator_categories'),
+      (snapshot) => {
+        if (!isMounted) return;
+        const list: string[] = [];
+        snapshot.forEach((d) => {
+          const name = d.data()?.name || d.id;
+          if (name && !list.includes(name)) list.push(name);
+        });
+        if (list.length > 0) {
+          const merged = Array.from(new Set([...DEFAULT_PRODUCT_CATEGORIES, ...list]));
+          const fp = JSON.stringify(merged);
+          if (fp !== lastFingerprint) {
+            lastFingerprint = fp;
+            onCategories(merged);
+          }
+        }
+      },
+      () => {}
+    );
+  } catch {}
+
+  return () => {
+    isMounted = false;
+    clearInterval(interval);
+    unsubFirestore();
+  };
 }
 
 // -------------------------------------------------------------

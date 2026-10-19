@@ -22,6 +22,11 @@ import {
   subscribeToProductUpdates,
   fetchServerAuditLogs,
   recordAuditLog,
+  fetchServerCategories,
+  saveCategoryToServer,
+  deleteCategoryFromServer,
+  subscribeToCategoryUpdates,
+  DEFAULT_PRODUCT_CATEGORIES,
 } from './lib/calculatorServerSync.ts';
 import { recalculateStoredProduct, INITIAL_PRESET_PRODUCTS } from './lib/calculatorStorage.ts';
 import { ProductCalculator } from './components/ProductCalculator.tsx';
@@ -37,7 +42,10 @@ export const App: React.FC = () => {
   });
 
   // 2. Main Catalog & Navigation State
-  const [products, setProducts] = useState<CalculatedProduct[]>(INITIAL_PRESET_PRODUCTS);
+  // Initialized to empty array so deleted products are never resurrected across sessions or devices
+  const [products, setProducts] = useState<CalculatedProduct[]>([]);
+  const [categories, setCategories] = useState<string[]>(DEFAULT_PRODUCT_CATEGORIES);
+  const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<'tracker' | 'calculator' | 'audit'>('tracker');
   const [editingProduct, setEditingProduct] = useState<CalculatedProduct | null>(null);
 
@@ -52,39 +60,53 @@ export const App: React.FC = () => {
     setIsSyncing(true);
     setSyncStatusMsg('Syncing with server...');
     try {
-      const [prods, logs] = await Promise.all([
+      const [prods, logs, cats] = await Promise.all([
         fetchServerProducts(),
         fetchServerAuditLogs(),
+        fetchServerCategories(),
       ]);
-      if (prods && prods.length > 0) {
-        setProducts(prods);
+      // Always store server products (even if empty after deletion)
+      setProducts(prods || []);
+      setAuditLogs(logs || []);
+      if (Array.isArray(cats) && cats.length > 0) {
+        setCategories(cats);
       }
-      setAuditLogs(logs);
       setSyncStatusMsg('Synced with server');
     } catch (e) {
       console.warn('Sync warning:', e);
       setSyncStatusMsg('Local cache active');
     } finally {
       setIsSyncing(false);
+      setIsInitialLoading(false);
       setTimeout(() => setSyncStatusMsg(''), 3000);
     }
   }, [activePartner]);
 
   // Boot & Real-time Live Synchronization Subscription
+  // Instant real-time sync between Aditya and Anshuman across continents
   useEffect(() => {
     if (!activePartner) return;
 
     loadDataFromServer();
 
-    // Subscribe to Firestore real-time updates across devices
-    const unsub = subscribeToProductUpdates((liveProducts) => {
-      if (Array.isArray(liveProducts) && liveProducts.length > 0) {
+    // Subscribe to product updates (both server poll and Firestore onSnapshot)
+    const unsubProds = subscribeToProductUpdates((liveProducts) => {
+      if (Array.isArray(liveProducts)) {
         setProducts(liveProducts);
+        setIsInitialLoading(false);
+      }
+    });
+
+    // Subscribe to real-time category updates
+    const unsubCats = subscribeToCategoryUpdates((liveCats) => {
+      if (Array.isArray(liveCats) && liveCats.length > 0) {
+        setCategories(liveCats);
       }
     });
 
     return () => {
-      unsub();
+      unsubProds();
+      unsubCats();
     };
   }, [activePartner, loadDataFromServer]);
 
@@ -193,18 +215,18 @@ export const App: React.FC = () => {
     setActiveTab('tracker');
   };
 
-  // Handle Deleting a Product (Zero window.confirm dependency for sandboxed environments)
+  // Handle Deleting a Product (Instantly removes across all partner devices)
   const handleDeleteProduct = async (id: string) => {
     if (!activePartner) return;
     const target = products.find((p) => p.id === id);
 
-    // Optimistically remove from client state
+    // Optimistically remove from client state immediately
     setProducts((prev) => prev.filter((p) => p.id !== id));
     if (editingProduct?.id === id) {
       setEditingProduct(null);
     }
 
-    // Persist deletion to server and Firestore, and record in audit log
+    // Persist deletion to server tombstone registry and Firestore, and record in audit log
     await deleteProductFromServer(id, activePartner, target?.name);
     fetchServerAuditLogs().then(setAuditLogs).catch(() => {});
     setActiveTab('tracker');
@@ -251,6 +273,26 @@ export const App: React.FC = () => {
     fetchServerAuditLogs().then(setAuditLogs).catch(() => {});
   };
 
+  // Handle Adding a New Category
+  const handleAddCategory = async (name: string) => {
+    if (!activePartner) return;
+    const updated = await saveCategoryToServer(name, activePartner);
+    if (Array.isArray(updated) && updated.length > 0) {
+      setCategories(updated);
+    }
+    fetchServerAuditLogs().then(setAuditLogs).catch(() => {});
+  };
+
+  // Handle Deleting a Category
+  const handleDeleteCategory = async (name: string) => {
+    if (!activePartner) return;
+    const updated = await deleteCategoryFromServer(name, activePartner);
+    if (Array.isArray(updated)) {
+      setCategories(updated);
+    }
+    fetchServerAuditLogs().then(setAuditLogs).catch(() => {});
+  };
+
   const handleOpenCalculatorNew = () => {
     setEditingProduct(null);
     setActiveTab('calculator');
@@ -275,7 +317,7 @@ export const App: React.FC = () => {
       await recordAuditLog({
         actor: activePartner,
         action: 'RESET_CATALOG',
-        details: `${activePartner} reset catalog to initial default presets.`,
+        details: `${activePartner} restored initial 3 demo product calculations.`,
       });
       fetchServerAuditLogs().then(setAuditLogs).catch(() => {});
     } catch {}
@@ -423,12 +465,16 @@ export const App: React.FC = () => {
         {activeTab === 'tracker' && (
           <ProductProfitTracker
             products={products}
+            categories={categories}
             activePartner={activePartner}
             onSelectProduct={handleEditProduct}
             onDeleteProduct={handleDeleteProduct}
             onAddNew={handleOpenCalculatorNew}
             onUpdateSales={handleUpdateSales}
             onUpdatePrice={handleUpdatePrice}
+            onAddCategory={handleAddCategory}
+            onDeleteCategory={handleDeleteCategory}
+            onRestorePresets={handleResetCatalog}
           />
         )}
 
@@ -436,9 +482,10 @@ export const App: React.FC = () => {
           <ProductCalculator
             initialProduct={editingProduct}
             activePartner={activePartner}
-            existingCategories={Array.from(new Set(products.map((p) => p.category).filter(Boolean)))}
+            existingCategories={categories}
             onSaveProduct={handleSaveProduct}
             onDeleteProduct={handleDeleteProduct}
+            onAddCategory={handleAddCategory}
             onCancel={() => {
               setEditingProduct(null);
               setActiveTab('tracker');

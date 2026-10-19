@@ -1,0 +1,65 @@
+[
+  {
+    "id": "audit-1792389478627-120",
+    "timestamp": "2026-10-19T05:57:58.627Z",
+    "user": "Aditya",
+    "action": "Deleted Product Calculation",
+    "category": "calculator",
+    "details": "Aditya deleted model \"Custom Voronoi Lamp\".",
+    "status": "Success"
+  },
+  {
+    "id": "audit-1792389143202-636",
+    "timestamp": "2026-10-19T05:52:23.202Z",
+    "user": "Aditya",
+    "action": "Admin Login",
+    "category": "security",
+    "details": "Aditya authenticated successfully with Master Password & Partner Passcode.",
+    "status": "Success"
+  },
+  {
+    "id": "audit-1792389132591-155",
+    "timestamp": "2026-10-19T05:52:12.591Z",
+    "user": "Adityaa",
+    "action": "Invalid User Login",
+    "category": "security",
+    "details": "Access denied for unknown partner username \"Adityaa\".",
+    "status": "Denied"
+  },
+  {
+    "id": "audit-1792389060198-40",
+    "timestamp": "2026-10-19T05:51:00.198Z",
+    "user": "Aditya",
+    "action": "Created Product Calculation",
+    "category": "calculator",
+    "details": "Aditya created new 3D model \"Custom Voronoi Lamp\" (Price: ₹749).",
+    "status": "Success"
+  },
+  {
+    "id": "audit-1792389050865-420",
+    "timestamp": "2026-10-19T05:50:50.865Z",
+    "user": "Aditya",
+    "action": "Passcode Mismatch",
+    "category": "security",
+    "details": "Failed passcode authentication for partner \"Aditya\".",
+    "status": "Denied"
+  },
+  {
+    "id": "audit-1792389050858-604",
+    "timestamp": "2026-10-19T05:50:50.858Z",
+    "user": "Anshuman",
+    "action": "Admin Login",
+    "category": "security",
+    "details": "Anshuman authenticated successfully with Master Password & Partner Passcode.",
+    "status": "Success"
+  },
+  {
+    "id": "audit-1792389050834-329",
+    "timestamp": "2026-10-19T05:50:50.834Z",
+    "user": "Aditya",
+    "action": "Admin Login",
+    "category": "security",
+    "details": "Aditya authenticated successfully with Master Password & Partner Passcode.",
+    "status": "Success"
+  }
+]

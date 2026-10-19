@@ -1,0 +1,6 @@
+{
+  "name": "3D Print Product Calculator & Profit Tracker",
+  "description": "Simple 3D printed product cost calculator with custom fields, machine & filament costing, and sales & profit tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

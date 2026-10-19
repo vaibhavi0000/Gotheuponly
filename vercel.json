@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    { "source": "/api/shadowfax/test-connection", "destination": "/api/shadowfax/test-connection" },
+    { "source": "/api/webhooks/shadowfax", "destination": "/api/webhooks/shadowfax" },
+    { "source": "/api/shadowfax/webhook", "destination": "/api/webhooks/shadowfax" },
+    { "source": "/api/webhooks/xpressbees", "destination": "/api/webhooks/xpressbees" },
+    { "source": "/api/tsukuri-products/deleted-ids", "destination": "/api/tsukuri-products/deleted-ids" },
+    { "source": "/api/tsukuri-products/bestseller", "destination": "/api/tsukuri-products/bestseller" },
+    { "source": "/api/tsukuri-products", "destination": "/api/tsukuri-products" },
+    { "source": "/api/tsukuri-products/:match*", "destination": "/api/tsukuri-products" },
+    { "source": "/api/uploads/(.*)", "destination": "/uploads/$1" },
+    { "source": "/uploads/(.*)", "destination": "/uploads/$1" },
+    { "source": "/data/(.*)", "destination": "/data/$1" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

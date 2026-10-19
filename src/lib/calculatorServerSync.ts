@@ -119,7 +119,7 @@ export async function loginPartner(
 // Products Server & Firestore Dual-Persistence with Tombstones
 // -------------------------------------------------------------
 
-function getLocalDeletedIds(): string[] {
+export function getLocalDeletedIds(): string[] {
   try {
     const raw = localStorage.getItem('calc_deleted_product_ids');
     if (raw) {
@@ -130,21 +130,47 @@ function getLocalDeletedIds(): string[] {
   return [];
 }
 
-function recordLocalDeletedId(id: string): void {
+export function recordLocalDeletedId(id: string): void {
   try {
     const current = getLocalDeletedIds();
-    const strId = String(id);
-    if (!current.includes(strId)) {
+    const strId = String(id).trim();
+    if (strId && !current.includes(strId)) {
       current.push(strId);
       localStorage.setItem('calc_deleted_product_ids', JSON.stringify(current));
     }
   } catch {}
 }
 
+export function removeLocalDeletedId(id: string): void {
+  try {
+    const current = getLocalDeletedIds();
+    const strId = String(id).trim();
+    const filtered = current.filter((item) => item !== strId);
+    localStorage.setItem('calc_deleted_product_ids', JSON.stringify(filtered));
+  } catch {}
+}
+
 export async function fetchServerProducts(): Promise<CalculatedProduct[]> {
   let serverDeletedIds: string[] = getLocalDeletedIds();
 
-  // 1. Fetch deleted IDs tombstones from server first
+  // 1a. Fetch deleted IDs tombstones from Firestore (Essential for cross-continental sync between India & Australia)
+  try {
+    const firestoreDelSnap = await getDocs(collection(db, 'calculator_deleted_ids'));
+    if (!firestoreDelSnap.empty) {
+      const fDelIds: string[] = [];
+      firestoreDelSnap.forEach((d) => {
+        if (d.id) fDelIds.push(String(d.id).trim());
+      });
+      if (fDelIds.length > 0) {
+        serverDeletedIds = Array.from(new Set([...serverDeletedIds, ...fDelIds]));
+        localStorage.setItem('calc_deleted_product_ids', JSON.stringify(serverDeletedIds));
+      }
+    }
+  } catch (fDelErr) {
+    console.warn('Error fetching deleted IDs from Firestore:', fDelErr);
+  }
+
+  // 1b. Fetch deleted IDs tombstones from server API
   try {
     const delRes = await fetch('/api/calculator-products/deleted-ids');
     if (delRes.ok) {
@@ -158,41 +184,58 @@ export async function fetchServerProducts(): Promise<CalculatedProduct[]> {
     console.warn('Error fetching deleted IDs from server:', err);
   }
 
+  // 1c. Sync merged tombstones to server in background
+  if (serverDeletedIds.length > 0) {
+    fetch('/api/calculator-products/deleted-ids', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: serverDeletedIds }),
+    }).catch(() => {});
+  }
+
   // 2. Fetch authoritative products list from Server API
+  let serverList: CalculatedProduct[] = [];
   try {
     const res = await fetch('/api/calculator-products');
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data)) {
         // Filter out any tombstoned IDs deleted by either partner
-        const active = data
+        serverList = data
           .filter((p: any) => p && p.id && !serverDeletedIds.includes(String(p.id)))
           .map(recalculateStoredProduct);
-        return active;
       }
     }
   } catch (err) {
     console.warn('Error fetching products from server API:', err);
   }
 
-  // 3. Try Firestore 'calculator_products'
+  // 3. Fallback/Supplement from Firestore 'calculator_products'
   try {
     const snap = await getDocs(collection(db, 'calculator_products'));
     if (!snap.empty) {
-      const list: CalculatedProduct[] = [];
+      const firestoreList: CalculatedProduct[] = [];
       snap.forEach((d) => {
         if (!serverDeletedIds.includes(d.id)) {
           const item = d.data() as CalculatedProduct;
-          list.push(recalculateStoredProduct({ ...item, id: d.id }));
+          firestoreList.push(recalculateStoredProduct({ ...item, id: d.id }));
         }
       });
-      return list;
+      // If server returned products, prefer server products merged with any unique firestore products
+      if (serverList.length > 0) {
+        const serverIds = new Set(serverList.map((p) => p.id));
+        const extraFromFirestore = firestoreList.filter((p) => !serverIds.has(p.id));
+        const combined = [...serverList, ...extraFromFirestore];
+        return combined.filter((p) => !serverDeletedIds.includes(p.id));
+      } else if (firestoreList.length > 0) {
+        return firestoreList.filter((p) => !serverDeletedIds.includes(p.id));
+      }
     }
   } catch (fErr) {
     console.warn('Error fetching products from Firestore:', fErr);
   }
 
-  return [];
+  return serverList;
 }
 
 export async function saveProductToServer(
@@ -204,6 +247,12 @@ export async function saveProductToServer(
     lastModifiedBy: actor,
     updatedAt: new Date().toISOString(),
   });
+
+  // If this product was previously marked deleted, untombstone it
+  removeLocalDeletedId(recalculated.id);
+  try {
+    await deleteDoc(doc(db, 'calculator_deleted_ids', recalculated.id));
+  } catch {}
 
   // 1. Save to Express server API
   try {
@@ -241,10 +290,23 @@ export async function deleteProductFromServer(
   actor: PartnerName,
   productName?: string
 ): Promise<boolean> {
-  const strId = String(id);
+  const strId = String(id).trim();
   recordLocalDeletedId(strId);
 
-  // 1. Delete on Express Server API + Register Tombstone
+  // 1. Register Cloud Tombstone on Firestore FIRST (Immediate global broadcast to all clients)
+  try {
+    await setDoc(doc(db, 'calculator_deleted_ids', strId), {
+      id: strId,
+      deletedAt: new Date().toISOString(),
+      deletedBy: actor,
+      productName: productName || strId,
+    });
+    await deleteDoc(doc(db, 'calculator_products', strId));
+  } catch (fErr) {
+    console.warn('Firestore delete error:', fErr);
+  }
+
+  // 2. Delete on Express Server API + Register Server Tombstone
   try {
     await fetch(`/api/calculator-products/${encodeURIComponent(strId)}?user=${encodeURIComponent(actor)}`, {
       method: 'DELETE',
@@ -256,18 +318,6 @@ export async function deleteProductFromServer(
     });
   } catch (err) {
     console.warn('Server delete error:', err);
-  }
-
-  // 2. Delete on Firestore & Record Tombstone Doc
-  try {
-    await deleteDoc(doc(db, 'calculator_products', strId));
-    await setDoc(doc(db, 'calculator_deleted_ids', strId), {
-      id: strId,
-      deletedAt: new Date().toISOString(),
-      deletedBy: actor,
-    });
-  } catch (fErr) {
-    console.warn('Firestore delete error:', fErr);
   }
 
   // 3. Record in Audit Log
@@ -346,6 +396,25 @@ export function subscribeToProductUpdates(
 ): () => void {
   let isMounted = true;
   let lastProductFingerprint = '';
+  const inMemoryDeletedIds = new Set<string>(getLocalDeletedIds());
+
+  // Helper to re-emit filtered products
+  const applyProductUpdate = (rawList: CalculatedProduct[]) => {
+    if (!isMounted) return;
+    const active = rawList.filter((p) => p && p.id && !inMemoryDeletedIds.has(String(p.id).trim()));
+    const fingerprint = JSON.stringify(
+      active.map((p) => ({
+        id: p.id,
+        price: p.sellingPrice,
+        units: p.unitsSold,
+        updatedAt: p.updatedAt,
+      }))
+    );
+    if (fingerprint !== lastProductFingerprint) {
+      lastProductFingerprint = fingerprint;
+      onProducts(active);
+    }
+  };
 
   // 1. High-frequency active Server Poll (every 2.5 seconds)
   // Ensures Anshuman's desktop in Australia reflects deletions made by Aditya immediately
@@ -354,20 +423,7 @@ export function subscribeToProductUpdates(
     try {
       const activeProducts = await fetchServerProducts();
       if (!isMounted) return;
-
-      const fingerprint = JSON.stringify(
-        activeProducts.map((p) => ({
-          id: p.id,
-          price: p.sellingPrice,
-          units: p.unitsSold,
-          updatedAt: p.updatedAt,
-        }))
-      );
-
-      if (fingerprint !== lastProductFingerprint) {
-        lastProductFingerprint = fingerprint;
-        onProducts(activeProducts);
-      }
+      applyProductUpdate(activeProducts);
     } catch (e) {
       console.warn('Real-time sync poll error:', e);
     }
@@ -377,32 +433,59 @@ export function subscribeToProductUpdates(
   pollServer();
   const pollInterval = setInterval(pollServer, 2500);
 
-  // 2. Firestore onSnapshot real-time listener
-  let unsubFirestore = () => {};
+  // 2. Real-time Firestore Tombstone Listener (Crucial: Instantly catches deletions across continents!)
+  let unsubDeletedDocs = () => {};
   try {
-    unsubFirestore = onSnapshot(
+    unsubDeletedDocs = onSnapshot(
+      collection(db, 'calculator_deleted_ids'),
+      (snapshot) => {
+        if (!isMounted) return;
+        let hasNew = false;
+        snapshot.forEach((d) => {
+          const strId = String(d.id).trim();
+          if (strId && !inMemoryDeletedIds.has(strId)) {
+            inMemoryDeletedIds.add(strId);
+            hasNew = true;
+          }
+        });
+        if (hasNew) {
+          const arr = Array.from(inMemoryDeletedIds);
+          localStorage.setItem('calc_deleted_product_ids', JSON.stringify(arr));
+          // Propagate to local server API
+          fetch('/api/calculator-products/deleted-ids', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: arr }),
+          }).catch(() => {});
+          // Trigger immediate server poll to refresh UI
+          pollServer();
+        }
+      },
+      (err) => {
+        console.warn('Deleted IDs snapshot listener notice:', err);
+      }
+    );
+  } catch (e) {
+    console.warn('Unable to bind deleted IDs snapshot listener:', e);
+  }
+
+  // 3. Firestore onSnapshot real-time products listener
+  let unsubFirestoreProducts = () => {};
+  try {
+    unsubFirestoreProducts = onSnapshot(
       collection(db, 'calculator_products'),
       (snapshot) => {
         if (!isMounted) return;
-        const deletedIds = getLocalDeletedIds();
         const list: CalculatedProduct[] = [];
         snapshot.forEach((d) => {
-          if (!deletedIds.includes(d.id)) {
+          const strId = String(d.id).trim();
+          if (!inMemoryDeletedIds.has(strId)) {
             const item = d.data() as CalculatedProduct;
             list.push(recalculateStoredProduct({ ...item, id: d.id }));
           }
         });
-        const fingerprint = JSON.stringify(
-          list.map((p) => ({
-            id: p.id,
-            price: p.sellingPrice,
-            units: p.unitsSold,
-            updatedAt: p.updatedAt,
-          }))
-        );
-        if (fingerprint !== lastProductFingerprint) {
-          lastProductFingerprint = fingerprint;
-          onProducts(list);
+        if (list.length > 0) {
+          applyProductUpdate(list);
         }
       },
       (err) => {
@@ -416,8 +499,52 @@ export function subscribeToProductUpdates(
   return () => {
     isMounted = false;
     clearInterval(pollInterval);
-    unsubFirestore();
+    unsubDeletedDocs();
+    unsubFirestoreProducts();
   };
+}
+
+export async function restoreCatalogPresetsOnServer(
+  actor: PartnerName
+): Promise<CalculatedProduct[]> {
+  // 1. Clear demo preset IDs from local storage
+  INITIAL_PRESET_PRODUCTS.forEach((p) => {
+    removeLocalDeletedId(p.id);
+  });
+
+  // 2. Clear from Firestore calculator_deleted_ids
+  try {
+    for (const p of INITIAL_PRESET_PRODUCTS) {
+      await deleteDoc(doc(db, 'calculator_deleted_ids', p.id));
+    }
+  } catch {}
+
+  // 3. Save to server API restore endpoint
+  try {
+    await fetch('/api/calculator-products/restore-presets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: actor }),
+    });
+  } catch (err) {
+    console.warn('Server restore presets error:', err);
+  }
+
+  // 4. Save presets to Firestore
+  try {
+    for (const p of INITIAL_PRESET_PRODUCTS) {
+      await setDoc(doc(db, 'calculator_products', p.id), p);
+    }
+  } catch {}
+
+  // 5. Record Audit Log
+  await recordAuditLog({
+    actor,
+    action: 'RESET_CATALOG',
+    details: `${actor} restored 3 demo product calculations to live catalog.`,
+  }).catch(() => {});
+
+  return INITIAL_PRESET_PRODUCTS;
 }
 
 // -------------------------------------------------------------

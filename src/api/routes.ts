@@ -3832,13 +3832,36 @@ function getCalcDeletedIdsFromServer(): string[] {
 function addCalcDeletedIdToServer(id: string): string[] {
   try {
     const list = getCalcDeletedIdsFromServer();
-    const strId = String(id);
-    if (!list.includes(strId)) {
+    const strId = String(id).trim();
+    if (strId && !list.includes(strId)) {
       list.push(strId);
       const dir = path.dirname(CALC_DELETED_IDS_FILE);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(CALC_DELETED_IDS_FILE, JSON.stringify(list, null, 2), 'utf-8');
     }
+    // Prune immediately from CALC_PRODUCTS_FILE as well
+    if (fs.existsSync(CALC_PRODUCTS_FILE)) {
+      const data = fs.readFileSync(CALC_PRODUCTS_FILE, 'utf-8');
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed)) {
+        const filtered = parsed.filter((p: any) => p && String(p.id) !== strId && !list.includes(String(p.id)));
+        fs.writeFileSync(CALC_PRODUCTS_FILE, JSON.stringify(filtered, null, 2), 'utf-8');
+      }
+    }
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+function removeCalcDeletedIdFromServer(id: string): string[] {
+  try {
+    let list = getCalcDeletedIdsFromServer();
+    const strId = String(id).trim();
+    list = list.filter((item) => String(item) !== strId);
+    const dir = path.dirname(CALC_DELETED_IDS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(CALC_DELETED_IDS_FILE, JSON.stringify(list, null, 2), 'utf-8');
     return list;
   } catch {
     return [];
@@ -4175,13 +4198,39 @@ apiRouter.get('/calculator-products/deleted-ids', (req: Request, res: Response) 
 
 apiRouter.post('/calculator-products/deleted-ids', (req: Request, res: Response) => {
   try {
-    const { id } = req.body || {};
+    const { id, ids } = req.body || {};
     if (id) {
       addCalcDeletedIdToServer(String(id));
+    }
+    if (Array.isArray(ids)) {
+      ids.forEach((singleId: any) => {
+        if (singleId) addCalcDeletedIdToServer(String(singleId));
+      });
     }
     res.json({ success: true, deletedIds: getCalcDeletedIdsFromServer() });
   } catch (err: any) {
     res.status(500).json({ error: 'Failed to record deleted id' });
+  }
+});
+
+// Restore default preset products (clears tombstone for initial preset IDs)
+apiRouter.post('/calculator-products/restore-presets', (req: Request, res: Response) => {
+  try {
+    const { user } = req.body || {};
+    INITIAL_SERVER_PRODUCTS.forEach((p) => {
+      removeCalcDeletedIdFromServer(p.id);
+    });
+    saveCalcProductsToServer(INITIAL_SERVER_PRODUCTS);
+    appendAuditLogToServer({
+      user: user || 'Partner',
+      action: 'Restored Catalog Presets',
+      category: 'calculator',
+      details: `${user || 'Partner'} restored default demo 3D product calculations.`,
+      status: 'Success',
+    });
+    res.json({ success: true, products: INITIAL_SERVER_PRODUCTS });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to restore presets' });
   }
 });
 

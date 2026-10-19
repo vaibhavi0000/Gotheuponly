@@ -20,6 +20,7 @@ import {
   updateProductSalesOnServer,
   updateProductPriceOnServer,
   subscribeToProductUpdates,
+  restoreCatalogPresetsOnServer,
   fetchServerAuditLogs,
   recordAuditLog,
   fetchServerCategories,
@@ -307,20 +308,19 @@ export const App: React.FC = () => {
 
   const handleResetCatalog = async () => {
     if (!activePartner) return;
-    setProducts(INITIAL_PRESET_PRODUCTS);
+    setIsSyncing(true);
+    setSyncStatusMsg('Restoring demo presets...');
     try {
-      await fetch('/api/calculator-products/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ products: INITIAL_PRESET_PRODUCTS, user: activePartner }),
-      });
-      await recordAuditLog({
-        actor: activePartner,
-        action: 'RESET_CATALOG',
-        details: `${activePartner} restored initial 3 demo product calculations.`,
-      });
+      const restored = await restoreCatalogPresetsOnServer(activePartner);
+      setProducts(restored);
       fetchServerAuditLogs().then(setAuditLogs).catch(() => {});
-    } catch {}
+      setSyncStatusMsg('Presets restored');
+    } catch (e) {
+      console.warn('Error restoring presets:', e);
+    } finally {
+      setIsSyncing(false);
+      setTimeout(() => setSyncStatusMsg(''), 3000);
+    }
     setActiveTab('tracker');
   };
 
